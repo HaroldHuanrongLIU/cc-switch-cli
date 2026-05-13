@@ -4,6 +4,7 @@
 
 use super::*;
 use crate::app_config::MultiAppConfig;
+use crate::prompt::Prompt;
 use crate::provider::{Provider, ProviderManager};
 use indexmap::IndexMap;
 use rusqlite::{params, Connection};
@@ -1355,6 +1356,53 @@ fn dry_run_validates_schema_compatibility() {
     assert!(
         result.is_ok(),
         "Dry-run should succeed with provider data: {result:?}"
+    );
+}
+
+#[test]
+fn json_migration_imports_opencode_and_openclaw_prompts() {
+    let mut config = MultiAppConfig::default();
+    config.prompts.opencode.prompts.insert(
+        "oc-prompt".to_string(),
+        Prompt {
+            id: "oc-prompt".to_string(),
+            name: "OpenCode Prompt".to_string(),
+            content: "opencode content".to_string(),
+            description: None,
+            enabled: true,
+            created_at: Some(1),
+            updated_at: Some(2),
+        },
+    );
+    config.prompts.openclaw.prompts.insert(
+        "claw-prompt".to_string(),
+        Prompt {
+            id: "claw-prompt".to_string(),
+            name: "OpenClaw Prompt".to_string(),
+            content: "openclaw content".to_string(),
+            description: None,
+            enabled: false,
+            created_at: Some(3),
+            updated_at: Some(4),
+        },
+    );
+
+    let db = Database::memory().expect("create memory db");
+    db.migrate_from_json(&config).expect("migrate prompts");
+
+    let opencode = db.get_prompts("opencode").expect("load opencode prompts");
+    let openclaw = db.get_prompts("openclaw").expect("load openclaw prompts");
+
+    assert_eq!(
+        opencode.get("oc-prompt").expect("opencode prompt").content,
+        "opencode content"
+    );
+    assert_eq!(
+        openclaw
+            .get("claw-prompt")
+            .expect("openclaw prompt")
+            .content,
+        "openclaw content"
     );
 }
 
