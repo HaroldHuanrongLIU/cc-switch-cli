@@ -20,12 +20,13 @@ pub(super) fn render_usage(
     frame.render_widget(outer.clone(), area);
     let inner = outer.inner(area);
 
+    let overview_height = if inner.height >= 20 { 11 } else { 9 };
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(1),
             Constraint::Length(3),
-            Constraint::Length(9),
+            Constraint::Length(overview_height),
             Constraint::Min(0),
         ])
         .split(inner);
@@ -178,21 +179,43 @@ fn render_usage_metrics(
         return;
     }
 
-    if inner.height >= 6 {
+    if inner.height >= 9 {
         let rows = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Length(1),
                 Constraint::Length(1),
                 Constraint::Length(1),
-                Constraint::Min(0),
+                Constraint::Length(1),
+                Constraint::Length(1),
+                Constraint::Length(1),
                 Constraint::Length(3),
+                Constraint::Min(0),
             ])
             .split(inner);
 
         render_usage_metric_row(frame, rows[0], &usage_primary_metrics(summary), theme);
-        render_usage_metric_row(frame, rows[1], &usage_secondary_metrics(summary), theme);
-        render_usage_metric_row(frame, rows[2], &usage_tertiary_metrics(summary), theme);
+        render_usage_metric_row(frame, rows[2], &usage_secondary_metrics(summary), theme);
+        render_usage_metric_row(frame, rows[4], &usage_tertiary_metrics(summary), theme);
+        render_usage_cache_hit_line(frame, summary, rows[6], theme);
+        return;
+    }
+
+    if inner.height >= 7 {
+        let rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(1),
+                Constraint::Length(1),
+                Constraint::Length(1),
+                Constraint::Length(1),
+                Constraint::Length(3),
+                Constraint::Min(0),
+            ])
+            .split(inner);
+
+        render_usage_metric_row(frame, rows[0], &usage_primary_metrics(summary), theme);
+        render_usage_metric_row(frame, rows[2], &usage_secondary_metrics(summary), theme);
         render_usage_cache_hit_line(frame, summary, rows[4], theme);
         return;
     }
@@ -335,13 +358,11 @@ fn render_usage_metric_row(
         return;
     }
 
-    let gap = if area.width >= 72 { 2 } else { 1 };
+    let Some((gap, base_width)) = usage_metric_row_spacing(area.width) else {
+        return;
+    };
     let gaps_width = gap * 3;
     let available_width = area.width.saturating_sub(gaps_width);
-    let base_width = available_width / 4;
-    if base_width < 8 {
-        return;
-    }
 
     let mut columns = [Rect::new(area.x, area.y, 0, area.height); 4];
     let mut x = area.x;
@@ -362,6 +383,21 @@ fn render_usage_metric_row(
     }
 }
 
+pub(super) fn usage_metric_row_spacing(width: u16) -> Option<(u16, u16)> {
+    if width < 20 {
+        return None;
+    }
+
+    let preferred_gap = if width >= 84 { 4 } else { 2 };
+    let gap = if width.saturating_sub(preferred_gap * 3) / 4 >= 8 {
+        preferred_gap
+    } else {
+        1
+    };
+    let column_width = width.saturating_sub(gap * 3) / 4;
+    (column_width >= 8).then_some((gap, column_width))
+}
+
 fn render_usage_metric_card(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -372,19 +408,23 @@ fn render_usage_metric_card(
         return;
     }
 
-    let max_value_width = area.width.saturating_sub(4);
+    let label_value_gap = if area.width >= 12 { 2 } else { 1 };
+    let max_value_width = area.width.saturating_sub(label_value_gap + 1);
     if max_value_width == 0 {
         return;
     }
     let value_width = (UnicodeWidthStr::width(card.value.as_str()) as u16)
         .min(max_value_width)
         .max(1);
-    let label_width = area.width.saturating_sub(value_width).saturating_sub(1);
+    let label_width = area
+        .width
+        .saturating_sub(value_width)
+        .saturating_sub(label_value_gap);
     if label_width < 2 {
         return;
     }
 
-    let label = truncate_pad_to_display_width(card.label, label_width);
+    let label = truncate_to_display_width(card.label, label_width);
     let value = truncate_to_display_width(&card.value, value_width);
     if label.is_empty() || value.is_empty() {
         return;
@@ -393,7 +433,7 @@ fn render_usage_metric_card(
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled(label, Style::default().fg(theme.dim)),
-            Span::raw(" "),
+            Span::raw(" ".repeat(label_value_gap as usize)),
             Span::styled(
                 value,
                 usage_metric_value_style(theme).add_modifier(Modifier::BOLD),
@@ -401,17 +441,6 @@ fn render_usage_metric_card(
         ])),
         area,
     );
-}
-
-fn truncate_pad_to_display_width(text: &str, width: u16) -> String {
-    let truncated = truncate_to_display_width(text, width);
-    let display_width = UnicodeWidthStr::width(truncated.as_str());
-    let target_width = width as usize;
-    if display_width >= target_width {
-        truncated
-    } else {
-        format!("{truncated}{}", " ".repeat(target_width - display_width))
-    }
 }
 
 fn render_usage_metrics_compact(

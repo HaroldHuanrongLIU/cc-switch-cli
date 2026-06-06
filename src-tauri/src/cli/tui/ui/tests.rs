@@ -189,6 +189,93 @@ fn tui_usage_renders_summary_and_trend() {
 }
 
 #[test]
+fn tui_usage_overview_keeps_metric_values_near_labels() {
+    let _lang = use_test_language(Language::English);
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Usage;
+    app.focus = Focus::Content;
+    let mut data = minimal_data(&app.app_type);
+    data.usage.summary_7d = UsageSummarySnapshot {
+        total_requests: 4,
+        success_count: 3,
+        total_cost_usd: 1.25,
+        total_tokens: 1_800,
+        input_tokens: 1_000,
+        output_tokens: 500,
+        cache_read_tokens: 250,
+        cache_creation_tokens: 50,
+        avg_latency_ms: Some(420),
+    };
+
+    let all = all_text(&render_with_size(&app, &data, 180, 42));
+    let primary = line_with(&all, "Real Tokens");
+    let secondary = line_with(&all, "Input");
+    let tertiary = line_with(&all, "Errors");
+
+    assert!(primary.contains("Real Tokens  1.8k"), "{all}");
+    assert!(primary.contains("Requests  4"), "{all}");
+    assert!(secondary.contains("Input  1.0k"), "{all}");
+    assert!(secondary.contains("Output  500"), "{all}");
+    assert!(tertiary.contains("Errors  1"), "{all}");
+    assert!(tertiary.contains("Cost / Req  $0.312"), "{all}");
+
+    let primary_y = line_index(&all, "Real Tokens");
+    let secondary_y = line_index(&all, "Input");
+    let tertiary_y = line_index(&all, "Errors");
+    let cache_border_y = all
+        .lines()
+        .position(|line| line.contains('╭'))
+        .unwrap_or_else(|| panic!("missing cache border in:\n{all}"));
+    assert_eq!(secondary_y - primary_y, 2, "{all}");
+    assert_eq!(tertiary_y - secondary_y, 2, "{all}");
+    assert_eq!(cache_border_y - tertiary_y, 2, "{all}");
+}
+
+#[test]
+fn tui_usage_overview_short_height_keeps_even_spacing() {
+    let _lang = use_test_language(Language::English);
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Usage;
+    app.focus = Focus::Content;
+    let mut data = minimal_data(&app.app_type);
+    data.usage.summary_7d = UsageSummarySnapshot {
+        total_requests: 4,
+        success_count: 3,
+        total_cost_usd: 1.25,
+        total_tokens: 1_800,
+        input_tokens: 1_000,
+        output_tokens: 500,
+        cache_read_tokens: 250,
+        cache_creation_tokens: 50,
+        avg_latency_ms: Some(420),
+    };
+
+    let all = all_text(&render_with_size(&app, &data, 180, 24));
+
+    assert!(all.contains("Real Tokens  1.8k"), "{all}");
+    assert!(all.contains("Input  1.0k"), "{all}");
+    assert!(!all.contains("Cost / Req"), "{all}");
+
+    let primary_y = line_index(&all, "Real Tokens");
+    let secondary_y = line_index(&all, "Input");
+    let cache_border_y = all
+        .lines()
+        .position(|line| line.contains('╭'))
+        .unwrap_or_else(|| panic!("missing cache border in:\n{all}"));
+    assert_eq!(secondary_y - primary_y, 2, "{all}");
+    assert_eq!(cache_border_y - secondary_y, 2, "{all}");
+}
+
+#[test]
+fn tui_usage_metric_spacing_keeps_narrow_rows_drawable() {
+    assert_eq!(super::usage_metric_row_spacing(35), Some((1, 8)));
+    assert_eq!(super::usage_metric_row_spacing(36), Some((1, 8)));
+    assert_eq!(super::usage_metric_row_spacing(37), Some((1, 8)));
+}
+
+#[test]
 fn tui_usage_compact_trend_omits_text_summary() {
     let _lang = use_test_language(Language::English);
 
