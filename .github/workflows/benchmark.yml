@@ -16,8 +16,6 @@ on:
       - "scripts/check_benchmark_thresholds.py"
       - ".github/workflows/benchmark.yml"
   workflow_dispatch:
-  schedule:
-    - cron: "27 3 * * *"
 
 permissions:
   contents: read
