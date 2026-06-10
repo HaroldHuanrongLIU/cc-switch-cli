@@ -1543,8 +1543,43 @@ def tui_filter(session: TuiSession, text: str, marker: Callable[[str], bool]) ->
     session.wait_for(lambda s: text in s or compact_text in s, timeout=8)
     session.send(b"\r")
     time.sleep(0.15)
-    session.wait_for(marker, timeout=20)
+    session.wait_for(lambda s: not tui_filter_mode_active(s) and marker(s), timeout=20)
     return (time.perf_counter() - start) * 1000
+
+
+def screen_contains_compact(screen: str, text: str) -> bool:
+    return text in screen or text.replace(" ", "") in screen.replace(" ", "")
+
+
+def tui_filter_mode_active(screen: str) -> bool:
+    return (
+        "Type to filter, Enter apply, Esc clear & exit" in screen
+        or "输入关键字过滤，Enter 应用，Esc 清空并退出" in screen
+    )
+
+
+def tui_provider_action_marker(screen: str) -> bool:
+    compact = screen.replace(" ", "")
+    return (
+        "Space=switch" in screen
+        or "Space=切换" in screen
+        or "Spaceswitch" in compact
+        or "Space切换" in compact
+        or "Space=add/remove" in screen
+        or "Spaceadd/remove" in compact
+    )
+
+
+def tui_provider_row_marker(screen: str, provider_id: str, marker_text: str | None) -> bool:
+    if marker_text is not None and screen_contains_compact(screen, marker_text):
+        return True
+    prefix = f"{BENCH}-"
+    if provider_id.startswith(prefix):
+        suffix_parts = provider_id.removeprefix(prefix).rsplit("-", 1)
+        if len(suffix_parts) == 2:
+            app, suffix = suffix_parts
+            return f"https://bench-{app}-{suffix}.example.com" in screen
+    return False
 
 
 def tui_select_provider(
@@ -1555,12 +1590,10 @@ def tui_select_provider(
 ) -> float:
     session.send(b"\x1b[C")
     time.sleep(0.08)
-    marker_compact = marker_text.replace(" ", "") if marker_text is not None else None
     return tui_filter(
         session,
         query or provider_id,
-        lambda s: (provider_id in s or marker_text is None or marker_text in s or marker_compact in s)
-        and ("Space=switch" in s or "Space=切换" in s or "Space=add/remove" in s),
+        lambda s: tui_provider_row_marker(s, provider_id, marker_text) and tui_provider_action_marker(s),
     )
 
 
