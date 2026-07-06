@@ -190,7 +190,7 @@ pub(super) fn render_providers(
     let selected_supports_quota = visible
         .get(app.provider_idx)
         .is_some_and(|row| data::quota_target_for_provider(&app.app_type, row).is_some());
-    if app.focus == Focus::Content {
+    {
         let mut keys = Vec::new();
         if data.providers.rows.is_empty() {
             // While the cold-switched app is still loading, don't offer
@@ -230,7 +230,7 @@ pub(super) fn render_providers(
                 }
             }
         }
-        render_key_bar_center(frame, chunks[0], theme, &keys);
+        render_page_key_bar(frame, chunks[0], theme, &keys, app.focus == Focus::Content);
     }
 
     if data.providers.rows.is_empty() {

@@ -38,29 +38,28 @@ pub(super) fn render_sessions(
         ])
         .split(inner);
 
-    if app.focus == Focus::Content {
-        render_key_bar_center(
-            frame,
-            chunks[0],
-            theme,
-            &[
-                ("↑↓", texts::tui_key_select()),
-                ("←→/h/l", texts::tui_key_pane()),
-                ("Enter", texts::tui_key_view()),
-                ("R", texts::tui_key_restore()),
-                ("d", texts::tui_key_delete()),
-                ("r", texts::tui_key_refresh()),
-                (
-                    "a",
-                    if app.sessions.show_all_providers {
-                        texts::tui_key_sessions_all_active()
-                    } else {
-                        texts::tui_key_sessions_all()
-                    },
-                ),
-            ],
-        );
-    }
+    render_page_key_bar(
+        frame,
+        chunks[0],
+        theme,
+        &[
+            ("↑↓", texts::tui_key_select()),
+            ("←→/h/l", texts::tui_key_pane()),
+            ("Enter", texts::tui_key_view()),
+            ("R", texts::tui_key_restore()),
+            ("d", texts::tui_key_delete()),
+            ("r", texts::tui_key_refresh()),
+            (
+                "a",
+                if app.sessions.show_all_providers {
+                    texts::tui_key_sessions_all_active()
+                } else {
+                    texts::tui_key_sessions_all()
+                },
+            ),
+        ],
+        app.focus == Focus::Content,
+    );
 
     let summary = if app.sessions.loading && !app.sessions.loaded_once {
         texts::tui_sessions_loading_summary().to_string()

@@ -30,23 +30,22 @@ pub(super) fn render_usage(
         ])
         .split(inner);
 
-    if app.focus == Focus::Content {
-        render_key_bar_center(
-            frame,
-            chunks[0],
-            theme,
-            &[
-                ("1", usage_text("Today", "今日")),
-                ("2", usage_text("7 days", "7天")),
-                ("3", usage_text("30 days", "30天")),
-                ("C", usage_text("custom range", "自定义区间")),
-                ("Tab", texts::tui_key_pane()),
-                ("L", usage_text("details", "详情")),
-                ("P", usage_text("pricing", "模型定价")),
-                ("r", texts::tui_key_refresh()),
-            ],
-        );
-    }
+    render_page_key_bar(
+        frame,
+        chunks[0],
+        theme,
+        &[
+            ("1", usage_text("Today", "今日")),
+            ("2", usage_text("7 days", "7天")),
+            ("3", usage_text("30 days", "30天")),
+            ("C", usage_text("custom range", "自定义区间")),
+            ("Tab", texts::tui_key_pane()),
+            ("L", usage_text("details", "详情")),
+            ("P", usage_text("pricing", "模型定价")),
+            ("r", texts::tui_key_refresh()),
+        ],
+        app.focus == Focus::Content,
+    );
 
     render_summary_bar(frame, chunks[1], theme, usage_summary_line(app, data));
     render_usage_metrics(frame, app, data, chunks[2], theme);
@@ -78,20 +77,19 @@ pub(super) fn render_usage_logs(
         ])
         .split(outer.inner(area));
 
-    if app.focus == Focus::Content {
-        render_key_bar_center(
-            frame,
-            chunks[0],
-            theme,
-            &[
-                ("Tab", texts::tui_key_pane()),
-                ("↑↓/Pg", texts::tui_key_select()),
-                ("Enter", texts::tui_key_details()),
-                ("r", texts::tui_key_refresh()),
-                ("Esc", texts::tui_key_close()),
-            ],
-        );
-    }
+    render_page_key_bar(
+        frame,
+        chunks[0],
+        theme,
+        &[
+            ("Tab", texts::tui_key_pane()),
+            ("↑↓/Pg", texts::tui_key_select()),
+            ("Enter", texts::tui_key_details()),
+            ("r", texts::tui_key_refresh()),
+            ("Esc", texts::tui_key_close()),
+        ],
+        app.focus == Focus::Content,
+    );
 
     render_usage_detail_tabs(frame, app, chunks[1], theme);
     render_summary_bar(
@@ -123,17 +121,16 @@ pub(super) fn render_usage_log_detail(
         .constraints([Constraint::Length(1), Constraint::Min(0)])
         .split(outer.inner(area));
 
-    if app.focus == Focus::Content {
-        render_key_bar_center(
-            frame,
-            chunks[0],
-            theme,
-            &[
-                ("r", texts::tui_key_refresh()),
-                ("Esc", texts::tui_key_close()),
-            ],
-        );
-    }
+    render_page_key_bar(
+        frame,
+        chunks[0],
+        theme,
+        &[
+            ("r", texts::tui_key_refresh()),
+            ("Esc", texts::tui_key_close()),
+        ],
+        app.focus == Focus::Content,
+    );
 
     let row = data
         .usage

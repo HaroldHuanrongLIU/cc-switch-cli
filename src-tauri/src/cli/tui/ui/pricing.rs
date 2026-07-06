@@ -25,21 +25,20 @@ pub(super) fn render_pricing(
         ])
         .split(outer.inner(area));
 
-    if app.focus == Focus::Content {
-        render_key_bar_center(
-            frame,
-            chunks[0],
-            theme,
-            &[
-                ("↑↓/Pg", texts::tui_key_select()),
-                ("Enter", texts::tui_key_edit()),
-                ("d", texts::tui_key_delete()),
-                ("/", texts::tui_filter_title()),
-                ("r", texts::tui_key_refresh()),
-                ("Esc", texts::tui_key_close()),
-            ],
-        );
-    }
+    render_page_key_bar(
+        frame,
+        chunks[0],
+        theme,
+        &[
+            ("↑↓/Pg", texts::tui_key_select()),
+            ("Enter", texts::tui_key_edit()),
+            ("d", texts::tui_key_delete()),
+            ("/", texts::tui_filter_title()),
+            ("r", texts::tui_key_refresh()),
+            ("Esc", texts::tui_key_close()),
+        ],
+        app.focus == Focus::Content,
+    );
 
     render_summary_bar(frame, chunks[1], theme, pricing_summary_line(app, data));
     render_pricing_table(frame, app, data, chunks[2], theme);

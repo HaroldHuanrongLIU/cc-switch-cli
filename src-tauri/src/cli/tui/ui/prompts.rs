@@ -60,20 +60,19 @@ pub(super) fn render_prompts(
         ])
         .split(inner);
 
-    if app.focus == Focus::Content {
-        render_key_bar_center(
-            frame,
-            chunks[0],
-            theme,
-            &[
-                ("Space", texts::tui_key_toggle()),
-                ("a", texts::tui_key_add()),
-                ("Enter", texts::tui_key_view()),
-                ("e", texts::tui_key_edit()),
-                ("d", texts::tui_key_delete()),
-            ],
-        );
-    }
+    render_page_key_bar(
+        frame,
+        chunks[0],
+        theme,
+        &[
+            ("Space", texts::tui_key_toggle()),
+            ("a", texts::tui_key_add()),
+            ("Enter", texts::tui_key_view()),
+            ("e", texts::tui_key_edit()),
+            ("d", texts::tui_key_delete()),
+        ],
+        app.focus == Focus::Content,
+    );
 
     render_summary_bar(frame, chunks[1], theme, prompts_summary(data));
 

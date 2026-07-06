@@ -36,19 +36,18 @@ pub(super) fn render_skills_discover(
 
     render_skills_discover_source_tabs(frame, app, chunks[0], theme);
 
-    if app.focus == Focus::Content {
-        render_key_bar_center(
-            frame,
-            chunks[1],
-            theme,
-            &[
-                ("Enter", texts::tui_key_install()),
-                ("f", texts::tui_key_search()),
-                ("r", texts::tui_key_refresh()),
-                ("e", texts::tui_key_repo_manager()),
-            ],
-        );
-    }
+    render_page_key_bar(
+        frame,
+        chunks[1],
+        theme,
+        &[
+            ("Enter", texts::tui_key_install()),
+            ("f", texts::tui_key_search()),
+            ("r", texts::tui_key_refresh()),
+            ("e", texts::tui_key_repo_manager()),
+        ],
+        app.focus == Focus::Content,
+    );
 
     let query = app.filter.query_lower();
     let visible = app

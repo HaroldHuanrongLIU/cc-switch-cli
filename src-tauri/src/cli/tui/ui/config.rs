@@ -69,13 +69,11 @@ pub(super) fn render_config(
         .constraints([Constraint::Length(1), Constraint::Min(0)])
         .split(inner);
 
-    if app.focus == Focus::Content {
-        let mut keys = vec![("Enter", texts::tui_key_select())];
-        if matches!(items.get(app.config_idx), Some(ConfigItem::CommonSnippet)) {
-            keys.push(("e", texts::tui_key_edit_snippet()));
-        }
-        render_key_bar_center(frame, chunks[0], theme, &keys);
+    let mut keys = vec![("Enter", texts::tui_key_select())];
+    if matches!(items.get(app.config_idx), Some(ConfigItem::CommonSnippet)) {
+        keys.push(("e", texts::tui_key_edit_snippet()));
     }
+    render_page_key_bar(frame, chunks[0], theme, &keys, app.focus == Focus::Content);
 
     let table = Table::new(rows, [Constraint::Min(10)])
         .block(Block::default().borders(Borders::NONE))
@@ -112,16 +110,14 @@ pub(super) fn render_config_webdav(
         .constraints([Constraint::Length(1), Constraint::Min(0)])
         .split(inner);
 
-    if app.focus == Focus::Content {
-        let mut keys = vec![("Enter", texts::tui_key_select())];
-        if matches!(
-            items.get(app.config_webdav_idx),
-            Some(WebDavConfigItem::Settings)
-        ) {
-            keys.push(("e", texts::tui_key_edit()));
-        }
-        render_key_bar_center(frame, chunks[0], theme, &keys);
+    let mut keys = vec![("Enter", texts::tui_key_select())];
+    if matches!(
+        items.get(app.config_webdav_idx),
+        Some(WebDavConfigItem::Settings)
+    ) {
+        keys.push(("e", texts::tui_key_edit()));
     }
+    render_page_key_bar(frame, chunks[0], theme, &keys, app.focus == Focus::Content);
 
     let table = Table::new(rows, [Constraint::Min(10)])
         .block(Block::default().borders(Borders::NONE))
@@ -580,18 +576,17 @@ fn render_openclaw_env_route(
         ])
         .split(inner);
 
-    if app.focus == Focus::Content {
-        render_key_bar_center(
-            frame,
-            chunks[0],
-            theme,
-            &[
-                ("Enter", texts::tui_key_edit()),
-                ("e", texts::tui_key_edit()),
-                ("Esc", texts::tui_key_close()),
-            ],
-        );
-    }
+    render_page_key_bar(
+        frame,
+        chunks[0],
+        theme,
+        &[
+            ("Enter", texts::tui_key_edit()),
+            ("e", texts::tui_key_edit()),
+            ("Esc", texts::tui_key_close()),
+        ],
+        app.focus == Focus::Content,
+    );
 
     if has_warnings {
         render_warning_banner(frame, chunks[1], theme, &section_warnings);
@@ -930,19 +925,23 @@ fn render_openclaw_tools_route(
         ])
         .split(inner);
 
-    if app.focus == Focus::Content {
-        let key_bar_items = if load_failed {
-            vec![("Esc", texts::tui_key_close())]
-        } else {
-            vec![
-                ("Enter", texts::tui_key_edit()),
-                ("e", texts::tui_key_edit()),
-                ("Del/Backspace", texts::tui_key_delete()),
-                ("Esc", texts::tui_key_close()),
-            ]
-        };
-        render_key_bar_center(frame, chunks[0], theme, &key_bar_items);
-    }
+    let key_bar_items = if load_failed {
+        vec![("Esc", texts::tui_key_close())]
+    } else {
+        vec![
+            ("Enter", texts::tui_key_edit()),
+            ("e", texts::tui_key_edit()),
+            ("Del/Backspace", texts::tui_key_delete()),
+            ("Esc", texts::tui_key_close()),
+        ]
+    };
+    render_page_key_bar(
+        frame,
+        chunks[0],
+        theme,
+        &key_bar_items,
+        app.focus == Focus::Content,
+    );
 
     if has_parse_warning {
         render_warning_banner(frame, chunks[1], theme, &parse_warnings);
@@ -1437,18 +1436,22 @@ fn render_openclaw_agents_route(
         ])
         .split(inner);
 
-    if app.focus == Focus::Content {
-        let key_bar_items = if load_failed {
-            vec![("Esc", texts::tui_key_close())]
-        } else {
-            vec![
-                ("Enter", texts::tui_key_edit()),
-                ("Del", texts::tui_key_delete()),
-                ("Esc", texts::tui_key_close()),
-            ]
-        };
-        render_key_bar_center(frame, chunks[0], theme, &key_bar_items);
-    }
+    let key_bar_items = if load_failed {
+        vec![("Esc", texts::tui_key_close())]
+    } else {
+        vec![
+            ("Enter", texts::tui_key_edit()),
+            ("Del", texts::tui_key_delete()),
+            ("Esc", texts::tui_key_close()),
+        ]
+    };
+    render_page_key_bar(
+        frame,
+        chunks[0],
+        theme,
+        &key_bar_items,
+        app.focus == Focus::Content,
+    );
 
     if has_parse_warning {
         render_warning_banner(frame, chunks[1], theme, &parse_warnings);
@@ -2156,17 +2159,16 @@ fn render_openclaw_workspace(
         .constraints([Constraint::Length(1), Constraint::Min(0)])
         .split(inner);
 
-    if app.focus == Focus::Content {
-        render_key_bar_center(
-            frame,
-            chunks[0],
-            theme,
-            &[
-                ("Enter", texts::tui_key_open()),
-                ("o", texts::tui_key_open_directory()),
-            ],
-        );
-    }
+    render_page_key_bar(
+        frame,
+        chunks[0],
+        theme,
+        &[
+            ("Enter", texts::tui_key_open()),
+            ("o", texts::tui_key_open_directory()),
+        ],
+        app.focus == Focus::Content,
+    );
 
     let max_filename_len = crate::commands::workspace::ALLOWED_FILES
         .iter()
@@ -2331,19 +2333,18 @@ fn render_openclaw_daily_memory(
         ])
         .split(inner);
 
-    if app.focus == Focus::Content {
-        render_key_bar_center(
-            frame,
-            chunks[0],
-            theme,
-            &[
-                ("Enter", texts::tui_key_open()),
-                ("a", texts::tui_key_create()),
-                ("d", texts::tui_key_delete()),
-                ("o", texts::tui_key_open_directory()),
-            ],
-        );
-    }
+    render_page_key_bar(
+        frame,
+        chunks[0],
+        theme,
+        &[
+            ("Enter", texts::tui_key_open()),
+            ("a", texts::tui_key_create()),
+            ("d", texts::tui_key_delete()),
+            ("o", texts::tui_key_open_directory()),
+        ],
+        app.focus == Focus::Content,
+    );
 
     frame.render_widget(
         Paragraph::new(format!(
@@ -2405,18 +2406,17 @@ pub(super) fn render_hermes_memory(
         ])
         .split(inner);
 
-    if app.focus == Focus::Content {
-        render_key_bar_center(
-            frame,
-            chunks[0],
-            theme,
-            &[
-                ("Enter", texts::tui_key_edit()),
-                ("Space/x", texts::tui_key_toggle()),
-                ("o", texts::tui_key_open_directory()),
-            ],
-        );
-    }
+    render_page_key_bar(
+        frame,
+        chunks[0],
+        theme,
+        &[
+            ("Enter", texts::tui_key_edit()),
+            ("Space/x", texts::tui_key_toggle()),
+            ("o", texts::tui_key_open_directory()),
+        ],
+        app.focus == Focus::Content,
+    );
 
     frame.render_widget(
         Paragraph::new(format!(
@@ -2624,14 +2624,13 @@ pub(super) fn render_settings(
         .constraints([Constraint::Length(1), Constraint::Min(0)])
         .split(inner);
 
-    if app.focus == Focus::Content {
-        render_key_bar_center(
-            frame,
-            chunks[0],
-            theme,
-            &[("Enter", texts::tui_key_apply())],
-        );
-    }
+    render_page_key_bar(
+        frame,
+        chunks[0],
+        theme,
+        &[("Enter", texts::tui_key_apply())],
+        app.focus == Focus::Content,
+    );
 
     let table = Table::new(
         rows,
@@ -2685,10 +2684,8 @@ pub(super) fn render_settings_managed_accounts(
         ])
         .split(inner);
 
-    if app.focus == Focus::Content {
-        let keys = managed_account_key_items(app);
-        render_key_bar_center(frame, chunks[0], theme, &keys);
-    }
+    let keys = managed_account_key_items(app);
+    render_page_key_bar(frame, chunks[0], theme, &keys, app.focus == Focus::Content);
 
     render_summary_bar(frame, chunks[1], theme, managed_accounts_page_summary(app));
 
@@ -3181,20 +3178,24 @@ pub(super) fn render_settings_proxy(
         ])
         .split(inner);
 
-    if app.focus == Focus::Content {
-        let key_label = match LocalProxySettingsItem::ALL.get(app.settings_proxy_idx) {
-            Some(LocalProxySettingsItem::AutoFailover) => texts::tui_key_toggle(),
-            Some(LocalProxySettingsItem::ListenAddress) if data.proxy.running => "",
-            Some(LocalProxySettingsItem::ListenPort)
-                if data.proxy.has_active_worker_for(&app.app_type) =>
-            {
-                ""
-            }
-            _ => texts::tui_key_edit(),
-        };
-        if !key_label.is_empty() {
-            render_key_bar_center(frame, chunks[0], theme, &[("Enter", key_label)]);
+    let key_label = match LocalProxySettingsItem::ALL.get(app.settings_proxy_idx) {
+        Some(LocalProxySettingsItem::AutoFailover) => texts::tui_key_toggle(),
+        Some(LocalProxySettingsItem::ListenAddress) if data.proxy.running => "",
+        Some(LocalProxySettingsItem::ListenPort)
+            if data.proxy.has_active_worker_for(&app.app_type) =>
+        {
+            ""
         }
+        _ => texts::tui_key_edit(),
+    };
+    if !key_label.is_empty() {
+        render_page_key_bar(
+            frame,
+            chunks[0],
+            theme,
+            &[("Enter", key_label)],
+            app.focus == Focus::Content,
+        );
     }
 
     let table = Table::new(

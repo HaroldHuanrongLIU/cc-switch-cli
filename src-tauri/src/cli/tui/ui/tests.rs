@@ -4155,6 +4155,32 @@ fn help_text_shows_space_as_the_mcp_toggle_key() {
 }
 
 #[test]
+fn page_key_bar_stays_visible_while_nav_has_focus() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let prev = std::env::var("NO_COLOR").ok();
+    std::env::set_var("NO_COLOR", "1");
+    let _restore_no_color = EnvGuard {
+        key: "NO_COLOR",
+        prev,
+    };
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Mcp;
+    app.focus = Focus::Nav;
+    let data = minimal_data(&app.app_type);
+
+    // Page keys used to vanish whenever the nav pane had focus, hiding the
+    // available actions exactly when a user is deciding where to go.
+    let buf = render(&app, &data);
+    let all = all_text(&buf);
+    assert!(
+        all.contains("Space=toggle"),
+        "key bar should stay visible (dimmed) with nav focus: {all}"
+    );
+}
+
+#[test]
 fn empty_lists_show_guidance_instead_of_blank_space() {
     let _lock = lock_env();
     let _lang = use_test_language(Language::English);

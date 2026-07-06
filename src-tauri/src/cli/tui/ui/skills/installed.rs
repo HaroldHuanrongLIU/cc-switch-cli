@@ -24,21 +24,20 @@ pub(super) fn render_skills_installed(
         ])
         .split(inner);
 
-    if app.focus == Focus::Content {
-        render_key_bar_center(
-            frame,
-            chunks[0],
-            theme,
-            &[
-                ("Enter", texts::tui_key_details()),
-                ("Space", texts::tui_key_toggle()),
-                ("m", texts::tui_key_apps()),
-                ("f", texts::tui_key_discover()),
-                ("i", texts::tui_skills_action_import_existing()),
-                ("d", texts::tui_key_uninstall()),
-            ],
-        );
-    }
+    render_page_key_bar(
+        frame,
+        chunks[0],
+        theme,
+        &[
+            ("Enter", texts::tui_key_details()),
+            ("Space", texts::tui_key_toggle()),
+            ("m", texts::tui_key_apps()),
+            ("f", texts::tui_key_discover()),
+            ("i", texts::tui_skills_action_import_existing()),
+            ("d", texts::tui_key_uninstall()),
+        ],
+        app.focus == Focus::Content,
+    );
 
     render_summary_bar(frame, chunks[1], theme, installed_summary(data));
 

@@ -631,6 +631,46 @@ fn key_bar_items_for_width<'a>(
     fitted
 }
 
+fn key_bar_line_dimmed(theme: &super::theme::Theme, items: &[(&str, &str)]) -> Line<'static> {
+    if theme.no_color {
+        return key_bar_line(theme, items);
+    }
+
+    let base = Style::default().fg(theme.comment);
+    let key = base.add_modifier(Modifier::BOLD);
+
+    let mut spans: Vec<Span<'static>> = vec![Span::styled(" ", base)];
+    for (idx, (k, v)) in items.iter().enumerate() {
+        if idx > 0 {
+            spans.push(Span::styled("  ", base));
+        }
+        spans.push(Span::styled((*k).to_string(), key));
+        spans.push(Span::styled(" ", base));
+        spans.push(Span::styled((*v).to_string(), base));
+    }
+    spans.push(Span::styled(" ", base));
+    Line::from(spans)
+}
+
+/// Page-level key bar: always visible so the available actions can be
+/// discovered while the nav pane has focus; rendered muted (no chip
+/// background) until the content pane is focused.
+pub(super) fn render_page_key_bar(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    theme: &super::theme::Theme,
+    items: &[(&str, &str)],
+    focused: bool,
+) {
+    let fitted = key_bar_items_for_width(items, area.width);
+    let line = if focused {
+        key_bar_line(theme, &fitted)
+    } else {
+        key_bar_line_dimmed(theme, &fitted)
+    };
+    frame.render_widget(Paragraph::new(line).alignment(Alignment::Center), area);
+}
+
 /// Render a left-aligned key bar. Used for main-screen footers where keys
 /// are read left-to-right in priority order.
 pub(super) fn render_key_bar(
