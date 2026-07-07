@@ -22,6 +22,7 @@ use crate::services::session_usage::{
 };
 use crate::services::usage_stats::{should_skip_session_insert, DedupKey};
 use rust_decimal::Decimal;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::time::SystemTime;
 
@@ -53,24 +54,45 @@ struct OpenCodeMessageQueryResult {
     has_incomplete_usage: bool,
 }
 
-/// 一个待写入主库的会话（有界分批的批次元素）。
-struct PendingOpenCodeSession {
-    session_id: String,
-    sync_key: String,
-    time_updated: i64,
-    /// 消息查询完整且无 incomplete usage 时才推进会话级同步状态
-    advance_state: bool,
-    messages: Vec<(String, OpenCodeMessageData)>,
+/// 有界分批的批次元素：一条待写消息，或一个会话完成标记。
+///
+/// 与旧的"一个批次元素持有整会话全部消息"不同，这里把消息按 chunk 平铺入批：
+/// 单个含数千消息的会话也会被切成多个 <= SESSION_LOG_COMMIT_BATCH 的 chunk，
+/// 分多个短事务写入，不再形成超大事务。会话的**全部**消息入队完毕后追加一个
+/// `SessionFinalize` 标记，真正的会话级状态推进发生在该标记被 flush 时（且仅当
+/// 该会话所有 chunk 都无插入错误 + advance_state）。
+enum PendingOpenCodeItem {
+    /// 一条待写消息（携带所属会话，供跨 flush 的会话级错误归集与状态键推进）。
+    Message {
+        session_id: String,
+        request_id: String,
+        msg_data: OpenCodeMessageData,
+    },
+    /// 会话的全部消息已入队：flush 到达此标记时按条件推进会话级同步状态。
+    SessionFinalize {
+        session_id: String,
+        sync_key: String,
+        time_updated: i64,
+        /// 消息查询完整且无 incomplete usage 时才推进会话级同步状态。
+        advance_state: bool,
+    },
 }
 
-/// 把一个批次写入主库：一个短事务覆盖批内全部消息插入与会话级状态更新，
+/// 把一个批次写入主库：一个短事务覆盖批内全部消息插入与到达的会话完成标记，
 /// 提交后清空批次释放内存。
+///
+/// `session_errors` 跨 flush 存续：会话任一 chunk 出现插入错误就记入，其
+/// `SessionFinalize`（可能要到后续 flush 才被处理）据此跳过状态推进——从而保证
+/// "会话全部消息写入尝试完成、无插入错误"才 finalize，与旧的整会话事务语义一致。
+/// chunk 之间崩溃由 request_id 去重兜底：未 finalize 的会话下次整会话重扫，已写入
+/// 的消息命中 request_id 去重。
 fn flush_opencode_batch(
     db: &Database,
     pricing_cache: &mut PricingCache,
-    batch: &mut Vec<PendingOpenCodeSession>,
+    batch: &mut Vec<PendingOpenCodeItem>,
     result: &mut SessionSyncResult,
     has_sync_errors: &mut bool,
+    session_errors: &mut HashSet<String>,
 ) -> Result<(), AppError> {
     if batch.is_empty() {
         return Ok(());
@@ -81,44 +103,49 @@ fn flush_opencode_batch(
         .transaction()
         .map_err(|e| AppError::Database(format!("开启事务失败: {e}")))?;
 
-    for session in batch.iter() {
-        let mut session_had_error = false;
-
-        for (request_id, msg_data) in &session.messages {
-            match insert_opencode_message(
-                &tx,
-                pricing_cache,
+    for item in batch.iter() {
+        match item {
+            PendingOpenCodeItem::Message {
+                session_id,
                 request_id,
                 msg_data,
-                &session.session_id,
-            ) {
-                Ok(true) => result.imported += 1,
-                Ok(false) => result.skipped += 1,
-                Err(e) => {
-                    let msg = format!("OpenCode 消息插入失败 {request_id}: {e}");
-                    log::warn!("[OPENCODE-SYNC] {msg}");
-                    result.errors.push(msg);
-                    result.skipped += 1;
-                    session_had_error = true;
+            } => {
+                match insert_opencode_message(&tx, pricing_cache, request_id, msg_data, session_id)
+                {
+                    Ok(true) => result.imported += 1,
+                    Ok(false) => result.skipped += 1,
+                    Err(e) => {
+                        let msg = format!("OpenCode 消息插入失败 {request_id}: {e}");
+                        log::warn!("[OPENCODE-SYNC] {msg}");
+                        result.errors.push(msg);
+                        result.skipped += 1;
+                        // 记入会话级错误：该会话的 finalize 将跳过状态推进（下次重试）。
+                        session_errors.insert(session_id.clone());
+                        *has_sync_errors = true;
+                    }
                 }
             }
-        }
-
-        if session_had_error {
-            *has_sync_errors = true;
-            continue;
-        }
-
-        if !session.advance_state {
-            continue;
-        }
-
-        // 更新会话级同步状态。失败时不要推进文件级状态，确保下次可重试。
-        if let Err(e) = update_sync_state_conn(&tx, &session.sync_key, session.time_updated, 0) {
-            let msg = format!("OpenCode 会话同步状态更新失败 {}: {e}", session.sync_key);
-            log::warn!("[OPENCODE-SYNC] {msg}");
-            result.errors.push(msg);
-            *has_sync_errors = true;
+            PendingOpenCodeItem::SessionFinalize {
+                session_id,
+                sync_key,
+                time_updated,
+                advance_state,
+            } => {
+                // 该会话任一 chunk 出现插入错误 → 不推进会话级状态（下次整会话重试）。
+                if session_errors.remove(session_id) {
+                    continue;
+                }
+                if !*advance_state {
+                    continue;
+                }
+                // 更新会话级同步状态。失败时不要推进文件级状态，确保下次可重试。
+                if let Err(e) = update_sync_state_conn(&tx, sync_key, *time_updated, 0) {
+                    let msg = format!("OpenCode 会话同步状态更新失败 {sync_key}: {e}");
+                    log::warn!("[OPENCODE-SYNC] {msg}");
+                    result.errors.push(msg);
+                    *has_sync_errors = true;
+                }
+            }
         }
     }
 
@@ -189,6 +216,39 @@ pub fn sync_opencode_usage(db: &Database) -> Result<SessionSyncResult, AppError>
         rusqlite::Connection::open_with_flags(&db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
             .map_err(|e| AppError::Database(format!("无法打开 opencode.db: {e}")))?;
 
+    // 本次同步周期共享的定价缓存，避免每条消息重复查 model_pricing 表。
+    let mut pricing_cache = PricingCache::new();
+
+    sync_opencode_sessions_from_conn(
+        db,
+        &opencode_conn,
+        &db_path_str,
+        file_modified,
+        &sync_states,
+        &mut pricing_cache,
+    )
+}
+
+/// 有界分批的核心：逐会话读外部 opencode 连接（期间不持主库锁），把每个会话的
+/// 消息按 `SESSION_LOG_COMMIT_BATCH` 切成 chunk 平铺入批，凑满阈值就作为一个批次
+/// 写入主库短事务并释放内存——单个含数千消息的巨会话也按 chunk 切齐，不再形成
+/// 超大事务。会话的全部消息入队完毕后追加 `SessionFinalize` 标记，会话级状态推进
+/// （无插入错误 + advance_state）发生在该标记被 flush 时；本轮完全成功才推进
+/// 文件级状态。
+///
+/// 崩溃语义：批次（chunk）之间崩溃由 request_id 去重兜底——未 finalize 的会话
+/// 下次整会话重扫，已写入的消息命中 request_id 去重。
+///
+/// 与 `sync_opencode_usage` 分离，便于用内存源库直接对核心分批逻辑做单元测试
+/// （不触发路径解析与全局进度埋点）。
+fn sync_opencode_sessions_from_conn(
+    db: &Database,
+    opencode_conn: &rusqlite::Connection,
+    db_path_str: &str,
+    file_modified: i64,
+    sync_states: &HashMap<String, (i64, i64)>,
+    pricing_cache: &mut PricingCache,
+) -> Result<SessionSyncResult, AppError> {
     let mut result = SessionSyncResult {
         imported: 0,
         skipped: 0,
@@ -197,18 +257,14 @@ pub fn sync_opencode_usage(db: &Database) -> Result<SessionSyncResult, AppError>
     };
     let mut has_sync_errors = false;
 
-    // 本次同步周期共享的定价缓存，避免每条消息重复查 model_pricing 表。
-    let mut pricing_cache = PricingCache::new();
-
     // 查询所有会话
-    let sessions = query_sessions(&opencode_conn)?;
+    let sessions = query_sessions(opencode_conn)?;
 
-    // 有界分批：逐会话读外部 opencode.db（期间不持主库锁），凑满约
-    // SESSION_LOG_COMMIT_BATCH 条消息就作为一个批次写入主库短事务并释放
-    // 内存。内存占用有界于单批，主库写锁窗口只覆盖每个批次的写入；批次
-    // 之间崩溃由 request_id 去重兜底，未推进的会话级状态让下次重试。
-    let mut batch: Vec<PendingOpenCodeSession> = Vec::new();
+    let mut batch: Vec<PendingOpenCodeItem> = Vec::new();
     let mut batch_messages: usize = 0;
+    // 跨 flush 存续的会话级插入错误集合：会话任一 chunk 出错即记入，其 finalize
+    // 据此跳过状态推进（下次整会话重试）。
+    let mut session_errors: HashSet<String> = HashSet::new();
 
     for (session_id, time_updated) in &sessions {
         // 检查会话是否需要重新同步（从预载快照读取）
@@ -218,37 +274,38 @@ pub fn sync_opencode_usage(db: &Database) -> Result<SessionSyncResult, AppError>
             continue; // 会话未更新，跳过
         }
 
-        match query_assistant_messages(&opencode_conn, session_id) {
+        match query_assistant_messages(opencode_conn, session_id) {
             Ok(query_result) => {
-                let messages: Vec<(String, OpenCodeMessageData)> = query_result
-                    .messages
-                    .into_iter()
-                    .map(|(message_id, msg_data)| {
-                        (
-                            format!("opencode_session:{session_id}:{message_id}"),
-                            msg_data,
-                        )
-                    })
-                    .collect();
-                batch_messages += messages.len();
-                batch.push(PendingOpenCodeSession {
+                let advance_state = !query_result.has_incomplete_usage;
+                // 逐消息平铺入批；每凑满 SESSION_LOG_COMMIT_BATCH 条即 flush 一个短
+                // 事务，单会话消息量再大也按 chunk 切齐，主库写锁窗口只覆盖单个批次。
+                for (message_id, msg_data) in query_result.messages {
+                    batch.push(PendingOpenCodeItem::Message {
+                        session_id: session_id.clone(),
+                        request_id: format!("opencode_session:{session_id}:{message_id}"),
+                        msg_data,
+                    });
+                    batch_messages += 1;
+                    if batch_messages >= SESSION_LOG_COMMIT_BATCH as usize {
+                        flush_opencode_batch(
+                            db,
+                            pricing_cache,
+                            &mut batch,
+                            &mut result,
+                            &mut has_sync_errors,
+                            &mut session_errors,
+                        )?;
+                        batch_messages = 0;
+                    }
+                }
+                // 会话全部消息已入队：追加 finalize 标记（不计入消息阈值，等下一次
+                // 消息凑满阈值或末尾统一 flush 时随批处理）。
+                batch.push(PendingOpenCodeItem::SessionFinalize {
                     session_id: session_id.clone(),
                     sync_key,
                     time_updated: *time_updated,
-                    advance_state: !query_result.has_incomplete_usage,
-                    messages,
+                    advance_state,
                 });
-
-                if batch_messages >= SESSION_LOG_COMMIT_BATCH as usize {
-                    flush_opencode_batch(
-                        db,
-                        &mut pricing_cache,
-                        &mut batch,
-                        &mut result,
-                        &mut has_sync_errors,
-                    )?;
-                    batch_messages = 0;
-                }
             }
             Err(e) => {
                 let msg = format!("OpenCode 会话消息查询失败 {session_id}: {e}");
@@ -258,14 +315,15 @@ pub fn sync_opencode_usage(db: &Database) -> Result<SessionSyncResult, AppError>
             }
         }
     }
-    drop(opencode_conn);
 
+    // 冲刷剩余批次（末尾消息 chunk + 尚未处理的 finalize 标记）。
     flush_opencode_batch(
         db,
-        &mut pricing_cache,
+        pricing_cache,
         &mut batch,
         &mut result,
         &mut has_sync_errors,
+        &mut session_errors,
     )?;
 
     // 仅在本轮完全成功时推进文件级状态；否则保留下次重试入口。
@@ -274,7 +332,7 @@ pub fn sync_opencode_usage(db: &Database) -> Result<SessionSyncResult, AppError>
         let tx = guard
             .transaction()
             .map_err(|e| AppError::Database(format!("开启事务失败: {e}")))?;
-        update_sync_state_conn(&tx, &db_path_str, file_modified, 0)?;
+        update_sync_state_conn(&tx, db_path_str, file_modified, 0)?;
         tx.commit()
             .map_err(|e| AppError::Database(format!("提交事务失败: {e}")))?;
     }
@@ -293,6 +351,8 @@ pub fn sync_opencode_usage(db: &Database) -> Result<SessionSyncResult, AppError>
 
 /// 查询所有会话的 (id, sync_watermark)
 fn query_sessions(conn: &rusqlite::Connection) -> Result<Vec<(String, i64)>, AppError> {
+    // ORDER BY ... DESC：最新会话最先入库。会话之间无状态依赖，处理顺序自由，
+    // 取降序让 Usage 默认视图（Today/7d）在首次导入时尽快出数。
     let mut stmt = conn
         .prepare(
             "SELECT s.id,
@@ -300,7 +360,7 @@ fn query_sessions(conn: &rusqlite::Connection) -> Result<Vec<(String, i64)>, App
              FROM session s
              LEFT JOIN message m ON m.session_id = s.id
              GROUP BY s.id
-             ORDER BY sync_watermark",
+             ORDER BY sync_watermark DESC",
         )
         .map_err(|e| AppError::Database(format!("准备会话查询失败: {e}")))?;
 
@@ -710,5 +770,127 @@ mod tests {
 
         let sessions = query_sessions(&conn).unwrap();
         assert_eq!(sessions, vec![("s1".to_string(), 200)]);
+    }
+
+    /// query_sessions 按 sync_watermark 降序返回（最新会话最先入库）。
+    #[test]
+    fn test_query_sessions_orders_newest_first() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE session (id TEXT, time_updated INTEGER);
+             CREATE TABLE message (
+                 id TEXT,
+                 session_id TEXT,
+                 time_created INTEGER,
+                 time_updated INTEGER,
+                 data TEXT
+             );
+             INSERT INTO session VALUES ('old', 100), ('new', 300), ('mid', 200);",
+        )
+        .unwrap();
+
+        let sessions = query_sessions(&conn).unwrap();
+        // sync_watermark 降序：new(300) → mid(200) → old(100)
+        assert_eq!(
+            sessions,
+            vec![
+                ("new".to_string(), 300),
+                ("mid".to_string(), 200),
+                ("old".to_string(), 100),
+            ]
+        );
+    }
+
+    /// fix 1：单个会话消息数 > SESSION_LOG_COMMIT_BATCH 时，分批按 chunk 切齐
+    /// （会话内部跨多个短事务写入，不再形成超大事务），断言全部消息导入、会话级
+    /// 与文件级同步状态均已推进；第二轮（预载 state 后）会话 watermark 已达 → 会话
+    /// 整体跳过，零导入零跳过。
+    ///
+    /// 注：单条消息插入失败的错误路径不易稳定构造，由现有 flush 逻辑
+    /// （session_errors 记入 → finalize 跳过 + has_sync_errors 阻止文件级推进）
+    /// 与 `should_skip_session_insert` 的 request_id 去重共同覆盖。
+    #[test]
+    fn test_sync_opencode_large_session_chunks_and_advances_state() -> Result<(), AppError> {
+        let db = Database::memory()?;
+
+        // 内存 opencode 源库：单会话含 > SESSION_LOG_COMMIT_BATCH 条已完成消息。
+        let src = rusqlite::Connection::open_in_memory().unwrap();
+        src.execute_batch(
+            "CREATE TABLE session (id TEXT, time_updated INTEGER);
+             CREATE TABLE message (
+                 id TEXT,
+                 session_id TEXT,
+                 time_created INTEGER,
+                 time_updated INTEGER,
+                 data TEXT
+             );
+             INSERT INTO session VALUES ('s1', 100);",
+        )
+        .unwrap();
+
+        // 501 > 阈值(500)：会话内部必然被切成 2 个 chunk、跨 2 个事务写入。
+        let msg_count = SESSION_LOG_COMMIT_BATCH as usize + 1;
+        {
+            // time_updated 固定为 50（< session 的 100），使会话 watermark = 100 稳定可断言。
+            let mut stmt = src
+                .prepare("INSERT INTO message VALUES (?1, 's1', ?2, 50, ?3)")
+                .unwrap();
+            for i in 0..msg_count {
+                // input tokens 唯一：即便走跨源指纹去重也不会互相误判（此处更是无关）。
+                let data = serde_json::json!({
+                    "role": "assistant",
+                    "tokens": { "input": 10 + i as u64, "output": 5 },
+                    "modelID": "m",
+                    "time": { "created": 1000 + i as i64, "completed": 2000 + i as i64 }
+                })
+                .to_string();
+                stmt.execute(rusqlite::params![format!("msg-{i}"), i as i64, data])
+                    .unwrap();
+            }
+        }
+
+        let db_path_str = "/tmp/opencode-batch-test.db";
+        let empty_states: HashMap<String, (i64, i64)> = HashMap::new();
+        let mut cache = PricingCache::new();
+
+        let result = sync_opencode_sessions_from_conn(
+            &db,
+            &src,
+            db_path_str,
+            999,
+            &empty_states,
+            &mut cache,
+        )?;
+        assert_eq!(result.imported, msg_count as u32, "全部消息导入");
+        assert_eq!(result.skipped, 0);
+        assert!(result.errors.is_empty());
+
+        // 全部消息落库
+        {
+            let conn = db.conn.lock().expect("lock conn");
+            let count: i64 =
+                conn.query_row("SELECT COUNT(*) FROM proxy_request_logs", [], |r| r.get(0))?;
+            assert_eq!(count, msg_count as i64);
+        }
+
+        // 会话级与文件级同步状态均已推进
+        let states = get_all_sync_states(&db)?;
+        assert_eq!(
+            states.get(&format!("{db_path_str}:s1")).copied(),
+            Some((100, 0)),
+            "会话级 state 推进到 watermark=100"
+        );
+        assert_eq!(
+            states.get(db_path_str).copied(),
+            Some((999, 0)),
+            "文件级 state 推进到 file_modified=999"
+        );
+
+        // 第二轮：预载 state 后会话 watermark 已达 → 会话被跳过，零导入零跳过。
+        let result2 =
+            sync_opencode_sessions_from_conn(&db, &src, db_path_str, 999, &states, &mut cache)?;
+        assert_eq!((result2.imported, result2.skipped), (0, 0), "全 skip");
+
+        Ok(())
     }
 }
