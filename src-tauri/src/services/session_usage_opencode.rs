@@ -115,11 +115,19 @@ pub fn sync_opencode_usage(db: &Database) -> Result<SessionSyncResult, AppError>
     // 查询所有会话
     let sessions = query_sessions(&opencode_conn)?;
 
-    // 全部会话的插入与同步状态更新收敛到一个写事务，最后统一提交（一次 fsync）。
-    let mut guard = lock_conn!(db.conn);
-    let tx = guard
-        .transaction()
-        .map_err(|e| AppError::Database(format!("开启事务失败: {e}")))?;
+    // 阶段一（不持有主库锁）：读外部 opencode.db，收集待写消息与待更新的
+    // 会话级同步状态。绝不在主库写事务内查询/解析外部库——那会让其他
+    // 并发写入者（TUI/daemon/代理日志）等到 busy timeout。
+    struct PendingSession {
+        session_id: String,
+        sync_key: String,
+        time_updated: i64,
+        /// 消息查询完整且无 incomplete usage 时才推进会话级同步状态
+        advance_state: bool,
+        messages: Vec<(String, OpenCodeMessageData)>,
+    }
+
+    let mut pending: Vec<PendingSession> = Vec::new();
 
     for (session_id, time_updated) in &sessions {
         // 检查会话是否需要重新同步（从预载快照读取）
@@ -129,40 +137,62 @@ pub fn sync_opencode_usage(db: &Database) -> Result<SessionSyncResult, AppError>
             continue; // 会话未更新，跳过
         }
 
-        let mut session_had_error = false;
-
-        // 查询该会话的所有 assistant 消息
-        let mut session_has_incomplete_usage = false;
         match query_assistant_messages(&opencode_conn, session_id) {
             Ok(query_result) => {
-                session_has_incomplete_usage = query_result.has_incomplete_usage;
-                for (message_id, msg_data) in &query_result.messages {
-                    let request_id = format!("opencode_session:{session_id}:{message_id}");
-
-                    match insert_opencode_message(
-                        &tx,
-                        &mut pricing_cache,
-                        &request_id,
-                        msg_data,
-                        session_id,
-                    ) {
-                        Ok(true) => result.imported += 1,
-                        Ok(false) => result.skipped += 1,
-                        Err(e) => {
-                            let msg = format!("OpenCode 消息插入失败 {request_id}: {e}");
-                            log::warn!("[OPENCODE-SYNC] {msg}");
-                            result.errors.push(msg);
-                            result.skipped += 1;
-                            session_had_error = true;
-                        }
-                    }
-                }
+                let messages = query_result
+                    .messages
+                    .into_iter()
+                    .map(|(message_id, msg_data)| {
+                        (
+                            format!("opencode_session:{session_id}:{message_id}"),
+                            msg_data,
+                        )
+                    })
+                    .collect();
+                pending.push(PendingSession {
+                    session_id: session_id.clone(),
+                    sync_key,
+                    time_updated: *time_updated,
+                    advance_state: !query_result.has_incomplete_usage,
+                    messages,
+                });
             }
             Err(e) => {
                 let msg = format!("OpenCode 会话消息查询失败 {session_id}: {e}");
                 log::warn!("[OPENCODE-SYNC] {msg}");
                 result.errors.push(msg);
-                session_had_error = true;
+                has_sync_errors = true;
+            }
+        }
+    }
+    drop(opencode_conn);
+
+    // 阶段二：全部插入与同步状态更新收敛到一个主库写事务，统一提交。
+    let mut guard = lock_conn!(db.conn);
+    let tx = guard
+        .transaction()
+        .map_err(|e| AppError::Database(format!("开启事务失败: {e}")))?;
+
+    for session in &pending {
+        let mut session_had_error = false;
+
+        for (request_id, msg_data) in &session.messages {
+            match insert_opencode_message(
+                &tx,
+                &mut pricing_cache,
+                request_id,
+                msg_data,
+                &session.session_id,
+            ) {
+                Ok(true) => result.imported += 1,
+                Ok(false) => result.skipped += 1,
+                Err(e) => {
+                    let msg = format!("OpenCode 消息插入失败 {request_id}: {e}");
+                    log::warn!("[OPENCODE-SYNC] {msg}");
+                    result.errors.push(msg);
+                    result.skipped += 1;
+                    session_had_error = true;
+                }
             }
         }
 
@@ -171,13 +201,13 @@ pub fn sync_opencode_usage(db: &Database) -> Result<SessionSyncResult, AppError>
             continue;
         }
 
-        if session_has_incomplete_usage {
+        if !session.advance_state {
             continue;
         }
 
         // 更新会话级同步状态。失败时不要推进文件级状态，确保下次可重试。
-        if let Err(e) = update_sync_state_conn(&tx, &sync_key, *time_updated, 0) {
-            let msg = format!("OpenCode 会话同步状态更新失败 {session_id}: {e}");
+        if let Err(e) = update_sync_state_conn(&tx, &session.sync_key, session.time_updated, 0) {
+            let msg = format!("OpenCode 会话同步状态更新失败 {}: {e}", session.sync_key);
             log::warn!("[OPENCODE-SYNC] {msg}");
             result.errors.push(msg);
             has_sync_errors = true;
