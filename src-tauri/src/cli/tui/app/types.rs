@@ -275,6 +275,12 @@ impl SessionsState {
             self.loading = false;
             self.loaded_once = true;
             self.last_error = Some(error);
+            // 失败即本次扫描的终态：此后不再接收该 scan 的任何 partial/finished，
+            // 继续保留 tombstone 无收益，反而会让残留的 tombstone 把下一轮同 key
+            // 的新建/恢复会话误过滤一次。故与 finish_scan 一致地在终态清空。
+            // 只在接受当前 request_id 时清空——避免旧扫描的迟到失败误清掉本轮
+            // active 扫描登记的 tombstone。
+            self.scan_tombstones.clear();
         }
     }
 
@@ -1024,6 +1030,35 @@ mod sessions_state_tests {
         // 下一轮扫描：tombstone 已清，同 key 的行（例如同名会话被重建）应保留。
         let request_id2 = state.start_scan("all".to_string());
         assert!(state.finish_scan(request_id2, vec![a.clone(), b.clone()]));
+        assert!(
+            state.rows.iter().any(|row| row.session_id == "a"),
+            "tombstone 已清，重新出现的行不应再被过滤"
+        );
+    }
+
+    /// 修复 2：fail_scan 终态清空 tombstones。扫描进行中删除会话会登记 tombstone，
+    /// 若该扫描以失败告终（panic/Err），旧代码只在 finish_scan 清 tombstone、
+    /// fail_scan 不清，残留的 tombstone 会把下一轮同 key 的新建/恢复会话误过滤
+    /// 一次。fail_scan 现与 finish_scan 一致地在终态清空。
+    #[test]
+    fn fail_scan_clears_tombstones() {
+        let mut state = SessionsState::default();
+        let request_id = state.start_scan("all".to_string());
+        let a = meta("claude", "a", 10);
+        state
+            .scan_tombstones
+            .insert(crate::cli::tui::app::session_key(&a));
+
+        // 匹配 request_id 的失败终态应清空 tombstones
+        state.fail_scan(request_id, "boom".to_string());
+        assert!(
+            state.scan_tombstones.is_empty(),
+            "fail_scan 终态应清空 tombstones"
+        );
+
+        // 下一轮扫描带回同 key 的行（同名会话被重建）—— tombstone 已清，不应再过滤
+        let request_id2 = state.start_scan("all".to_string());
+        assert!(state.finish_scan(request_id2, vec![a.clone()]));
         assert!(
             state.rows.iter().any(|row| row.session_id == "a"),
             "tombstone 已清，重新出现的行不应再被过滤"
