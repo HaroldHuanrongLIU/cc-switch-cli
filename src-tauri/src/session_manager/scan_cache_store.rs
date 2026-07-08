@@ -357,7 +357,51 @@ impl ScanCacheStore {
         Ok(())
     }
 
-    /// 读取某个文件的字节续传提示。
+    /// 一次性读取整张 `session_sync_resume` 表，键为绝对文件路径。
+    ///
+    /// fix 2：让上万文件的增量同步在 skip 前的身份校验走内存查找，而非逐文件
+    /// 查库（类比 [`crate::services::session_usage::get_all_sync_states`]）。稳态下
+    /// 顺带把"每变化文件一次 hint 查询"收敛为每周期一次全表查询。读失败由调用方
+    /// 降级为空表（视作无提示，全部回退旧路径），不影响正确性。
+    pub fn load_all_sync_resume(&self) -> Result<HashMap<String, SyncResumeHint>, AppError> {
+        let conn = self.lock()?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT file_path, last_modified, last_line_offset, byte_offset, state, tail_hash,
+                        pending_tail_len, pending_tail_hash, file_identity
+                 FROM session_sync_resume",
+            )
+            .map_err(|e| AppError::Database(e.to_string()))?;
+        let rows = stmt
+            .query_map([], |row| {
+                let file_path: String = row.get(0)?;
+                Ok((
+                    file_path.clone(),
+                    SyncResumeHint {
+                        file_path,
+                        last_modified: row.get(1)?,
+                        last_line_offset: row.get(2)?,
+                        byte_offset: row.get(3)?,
+                        state: row.get(4)?,
+                        tail_hash: row.get(5)?,
+                        pending_tail_len: row.get(6)?,
+                        pending_tail_hash: row.get(7)?,
+                        file_identity: row.get(8)?,
+                    },
+                ))
+            })
+            .map_err(|e| AppError::Database(e.to_string()))?;
+        let mut map = HashMap::new();
+        for row in rows {
+            let (path, hint) = row.map_err(|e| AppError::Database(e.to_string()))?;
+            map.insert(path, hint);
+        }
+        Ok(map)
+    }
+
+    /// 读取某个文件的字节续传提示。fix 2 后生产侧改用 [`Self::load_all_sync_resume`]
+    /// 预载，此单文件查询保留作 API 对称与测试用途。
+    #[allow(dead_code)]
     pub fn load_sync_resume(&self, file_path: &str) -> Result<Option<SyncResumeHint>, AppError> {
         let conn = self.lock()?;
         let mut stmt = conn
@@ -739,6 +783,34 @@ mod tests {
             .expect("hint");
         assert_eq!(loaded.pending_tail_len, None);
         assert_eq!(loaded.pending_tail_hash, None);
+    }
+
+    /// fix 2：一次全表读回整张 session_sync_resume（键为路径），供预载后内存查找。
+    #[test]
+    fn load_all_sync_resume_returns_every_row() {
+        let store = ScanCacheStore::in_memory().expect("open memory store");
+        let hint = |path: &str, mtime: i64| SyncResumeHint {
+            file_path: path.to_string(),
+            last_modified: mtime,
+            last_line_offset: 2,
+            byte_offset: 20,
+            state: Some("{}".to_string()),
+            tail_hash: Some(7),
+            pending_tail_len: None,
+            pending_tail_hash: None,
+            file_identity: Some(4242),
+        };
+        store
+            .save_sync_resume(&hint("/a.jsonl", 10))
+            .expect("save a");
+        store
+            .save_sync_resume(&hint("/b.jsonl", 20))
+            .expect("save b");
+
+        let all = store.load_all_sync_resume().expect("load all");
+        assert_eq!(all.len(), 2);
+        assert_eq!(all.get("/a.jsonl").unwrap().last_modified, 10);
+        assert_eq!(all.get("/b.jsonl").unwrap().file_identity, Some(4242));
     }
 
     #[test]

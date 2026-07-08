@@ -24,9 +24,10 @@ use crate::services::session_usage::{
 };
 use crate::services::session_usage_driver::{save_resume_hint, scan_jsonl_incremental};
 use crate::services::usage_stats::{should_skip_session_insert, DedupKey};
-use crate::session_manager::scan_cache_store::ScanCacheStore;
+use crate::session_manager::scan_cache_store::{ScanCacheStore, SyncResumeHint};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -206,6 +207,13 @@ pub fn sync_codex_usage(db: &Database) -> Result<SessionSyncResult, AppError> {
         .inspect_err(|e| log::debug!("[CODEX-SYNC] sidecar 打开失败，禁用字节续传: {e}"))
         .ok();
 
+    // fix 2：一次性预载全部续传提示（一次全表查询），使每文件的 skip 前身份校验与
+    // decide_resume 都是内存查找，零额外 per-file IO。
+    let resume_hints = resume_store
+        .as_ref()
+        .map(|s| s.load_all_sync_resume().unwrap_or_default())
+        .unwrap_or_default();
+
     crate::services::session_usage::sync_progress::add_total(files.len() as u32);
 
     for (file_path, file_mtime) in &files {
@@ -215,6 +223,7 @@ pub fn sync_codex_usage(db: &Database) -> Result<SessionSyncResult, AppError> {
             *file_mtime,
             &mut pricing_cache,
             resume_store.as_ref(),
+            &resume_hints,
         ) {
             Ok((imported, skipped)) => {
                 result.imported += imported;
@@ -314,6 +323,7 @@ fn sync_single_codex_file(
     file_mtime: i64,
     pricing_cache: &mut PricingCache,
     resume: Option<&ScanCacheStore>,
+    resume_hints: &HashMap<String, SyncResumeHint>,
 ) -> Result<(u32, u32), AppError> {
     let file_path_str = file_path.to_string_lossy().to_string();
 
@@ -324,12 +334,16 @@ fn sync_single_codex_file(
     // 写库阶段再统一批量落库（读文件期间不持有连接锁）。
     let mut pending: Vec<PendingCodexEntry> = Vec::new();
 
+    // fix 2：续传提示取自预载 map（零 per-file 查询）；sidecar 是否可用另行传入。
+    let hint = resume_hints.get(&file_path_str).cloned();
+
     let outcome = scan_jsonl_incremental(
         file_path,
         file_mtime,
         last_modified,
         last_offset,
-        resume,
+        hint,
+        resume.is_some(),
         || FileParseState {
             session_id: None,
             current_model: "unknown".to_string(),
@@ -675,7 +689,11 @@ mod tests {
         fs::write(&path, &head).expect("write");
 
         let mut cache = PricingCache::new();
-        let (imported, _) = sync_single_codex_file(&db, &path, 1, &mut cache, Some(&store))?;
+        // fix 2：提示由调用方预载后传入；测试每次调用前从 store 现取（等价生产侧
+        // 从预载 map 查找），使第二次调用能拿到第一次保存的续传提示。
+        let hints = store.load_all_sync_resume().unwrap_or_default();
+        let (imported, _) =
+            sync_single_codex_file(&db, &path, 1, &mut cache, Some(&store), &hints)?;
         assert_eq!(imported, 1);
 
         // 把 session_meta/turn_context 两行覆写为等长垃圾（e1 行保持原样，
@@ -686,8 +704,9 @@ mod tests {
         let junk = "x".repeat(prefix_len - 1) + "\n";
         fs::write(&path, format!("{junk}{e1}\n{e2}\n")).expect("rewrite");
 
+        let hints = store.load_all_sync_resume().unwrap_or_default();
         let (imported2, skipped2) =
-            sync_single_codex_file(&db, &path, 2, &mut cache, Some(&store))?;
+            sync_single_codex_file(&db, &path, 2, &mut cache, Some(&store), &hints)?;
         assert_eq!((imported2, skipped2), (1, 0));
 
         let conn = lock_conn!(db.conn);
@@ -719,7 +738,9 @@ mod tests {
         fs::write(&path, format!("{meta}\n{turn}\n{event}\n")).expect("write");
 
         let mut cache = PricingCache::new();
-        let (imported, _) = sync_single_codex_file(&db, &path, 1, &mut cache, Some(&store))?;
+        let hints = store.load_all_sync_resume().unwrap_or_default();
+        let (imported, _) =
+            sync_single_codex_file(&db, &path, 1, &mut cache, Some(&store), &hints)?;
         assert_eq!(imported, 1);
 
         let expected = resolve_codex_created_at(Some("2026-01-02T03:04:05Z"));

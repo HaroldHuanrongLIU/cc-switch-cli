@@ -17,7 +17,7 @@ use crate::services::session_usage_driver::{save_resume_hint, scan_jsonl_increme
 use crate::services::usage_stats::{
     effective_usage_log_filter, find_model_pricing, should_skip_session_insert, DedupKey,
 };
-use crate::session_manager::scan_cache_store::ScanCacheStore;
+use crate::session_manager::scan_cache_store::{ScanCacheStore, SyncResumeHint};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -347,6 +347,13 @@ pub fn sync_claude_session_logs(db: &Database) -> Result<SessionSyncResult, AppE
         .inspect_err(|e| log::debug!("[SESSION-SYNC] sidecar 打开失败，禁用字节续传: {e}"))
         .ok();
 
+    // fix 2：一次性预载全部续传提示（一次全表查询，类比 get_all_sync_states），
+    // 使每文件的 skip 前身份校验与 decide_resume 都是内存查找，零额外 per-file IO。
+    let resume_hints = resume_store
+        .as_ref()
+        .map(|s| s.load_all_sync_resume().unwrap_or_default())
+        .unwrap_or_default();
+
     sync_progress::add_total(jsonl_files.len() as u32);
 
     for (file_path, file_mtime) in &jsonl_files {
@@ -359,6 +366,7 @@ pub fn sync_claude_session_logs(db: &Database) -> Result<SessionSyncResult, AppE
             &sync_states,
             &mut pricing_cache,
             resume_store.as_ref(),
+            &resume_hints,
         ) {
             Ok((imported, skipped)) => {
                 result.imported += imported;
@@ -464,6 +472,7 @@ fn sync_single_file(
     sync_states: &HashMap<String, (i64, i64)>,
     pricing_cache: &mut PricingCache,
     resume: Option<&ScanCacheStore>,
+    resume_hints: &HashMap<String, SyncResumeHint>,
 ) -> Result<(u32, u32), AppError> {
     let file_path_str = file_path.to_string_lossy().to_string();
 
@@ -472,12 +481,17 @@ fn sync_single_file(
 
     let mut messages: HashMap<String, ParsedAssistantUsage> = HashMap::new();
 
+    // fix 2：续传提示取自预载 map（零 per-file 查询）；sidecar 是否可用另行传入，
+    // 供驱动决定末行无换行时是否回退 mtime-1。
+    let hint = resume_hints.get(&file_path_str).cloned();
+
     let outcome = scan_jsonl_incremental(
         file_path,
         file_mtime,
         last_modified,
         last_offset,
-        resume,
+        hint,
+        resume.is_some(),
         || ClaudeResumeState { session_id: None },
         |state, line, is_new| {
             // Claude 无需重放历史行重建状态（session id 存在提示里），
@@ -969,8 +983,13 @@ mod tests {
             let path_str = path.to_string_lossy().to_string();
             let mut cache = PricingCache::new();
 
+            // fix 2：提示由调用方预载后传入；测试每次调用前从 store 现取（等价生产
+            // 侧从预载 map 查找），使第二次调用能拿到第一次保存的续传提示。
+            let hints = resume
+                .map(|s| s.load_all_sync_resume().unwrap_or_default())
+                .unwrap_or_default();
             let (imported, _) =
-                sync_single_file(&db, &path, 1, &HashMap::new(), &mut cache, resume)?;
+                sync_single_file(&db, &path, 1, &HashMap::new(), &mut cache, resume, &hints)?;
             assert_eq!(imported, 2);
 
             // 头部换行 → 空格（字节数不变，行边界移位），再追加 m3
@@ -980,7 +999,10 @@ mod tests {
 
             let mut states = HashMap::new();
             states.insert(path_str, get_sync_state(&db, &path.to_string_lossy())?);
-            sync_single_file(&db, &path, 2, &states, &mut cache, resume)
+            let hints = resume
+                .map(|s| s.load_all_sync_resume().unwrap_or_default())
+                .unwrap_or_default();
+            sync_single_file(&db, &path, 2, &states, &mut cache, resume, &hints)
         };
 
         // 对照组（无续传提示）：行号前移导致 m3 被误跳过——这正是字节续传要修的
@@ -1258,7 +1280,8 @@ mod tests {
         let mut cache = PricingCache::new();
 
         // 首轮：m1/m2 导入，m3/m4 在插入前被过滤（既不计 imported 也不计 skipped）。
-        let (imported, skipped) = sync_single_file(&db, &path, 1, &states, &mut cache, None)?;
+        let (imported, skipped) =
+            sync_single_file(&db, &path, 1, &states, &mut cache, None, &HashMap::new())?;
         assert_eq!((imported, skipped), (2, 0));
 
         {
@@ -1271,7 +1294,8 @@ mod tests {
         }
 
         // 次轮：states 仍为空 → 重新解析，m1/m2 因 request_id 已存在被去重记为 skipped。
-        let (imported2, skipped2) = sync_single_file(&db, &path, 1, &states, &mut cache, None)?;
+        let (imported2, skipped2) =
+            sync_single_file(&db, &path, 1, &states, &mut cache, None, &HashMap::new())?;
         assert_eq!((imported2, skipped2), (0, 2));
 
         {
@@ -1314,7 +1338,8 @@ mod tests {
 
         let states: HashMap<String, (i64, i64)> = HashMap::new();
         let mut cache = PricingCache::new();
-        let (imported, skipped) = sync_single_file(&db, &path, 1, &states, &mut cache, None)?;
+        let (imported, skipped) =
+            sync_single_file(&db, &path, 1, &states, &mut cache, None, &HashMap::new())?;
         assert_eq!((imported, skipped), (2, 0));
 
         let conn = lock_conn!(db.conn);
