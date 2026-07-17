@@ -532,5 +532,7 @@ pub(crate) fn render_add_form(
         }
         FormState::McpAdd(mcp) => render_mcp_add_form(frame, app, mcp, area, theme),
         FormState::PromptMeta(prompt) => render_prompt_meta_form(frame, app, prompt, area, theme),
+        FormState::S3Sync(s3) => render_s3_sync_form(frame, app, s3, area, theme),
+        FormState::WebDavSync(webdav) => render_webdav_sync_form(frame, app, webdav, area, theme),
     }
 }

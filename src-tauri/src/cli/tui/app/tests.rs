@@ -5047,19 +5047,22 @@ mod tests {
     }
 
     #[test]
-    fn config_webdav_item_opens_second_level_menu() {
+    fn config_cloud_sync_item_opens_backend_menu() {
         let mut app = App::new(Some(AppType::Claude));
         app.route = Route::Config;
         app.focus = Focus::Content;
         app.config_idx = visible_config_items(&app.filter, &app.app_type)
             .iter()
-            .position(|item| matches!(item, ConfigItem::WebDavSync))
-            .expect("WebDavSync should be visible in the filtered config menu");
+            .position(|item| matches!(item, ConfigItem::CloudSync))
+            .expect("CloudSync should be visible in the filtered config menu");
 
         let data = UiData::default();
         let action = app.on_key(key(KeyCode::Enter), &data);
-        assert!(matches!(action, Action::SwitchRoute(Route::ConfigWebDav)));
-        assert!(matches!(app.route, Route::ConfigWebDav));
+        assert!(matches!(
+            action,
+            Action::SwitchRoute(Route::ConfigCloudSync)
+        ));
+        assert!(matches!(app.route, Route::ConfigCloudSync));
     }
 
     #[test]
@@ -10498,7 +10501,7 @@ mod tests {
     }
 
     #[test]
-    fn config_webdav_settings_opens_json_editor_in_second_level_menu() {
+    fn config_webdav_settings_opens_inline_form_in_second_level_menu() {
         let mut app = App::new(Some(AppType::Claude));
         app.route = Route::ConfigWebDav;
         app.focus = Focus::Content;
@@ -10516,10 +10519,7 @@ mod tests {
 
         let action = app.on_key(key(KeyCode::Enter), &data);
         assert!(matches!(action, Action::None));
-        assert!(matches!(
-            app.editor.as_ref().map(|e| &e.submit),
-            Some(EditorSubmit::ConfigWebDavSettings)
-        ));
+        assert!(matches!(app.form.as_ref(), Some(FormState::WebDavSync(_))));
     }
 
     #[test]
@@ -10527,7 +10527,12 @@ mod tests {
         let mut app = App::new(Some(AppType::Claude));
         app.route = Route::ConfigWebDav;
         app.focus = Focus::Content;
-        let data = UiData::default();
+        let mut data = UiData::default();
+        data.config.webdav_sync = Some(crate::settings::WebDavSyncSettings {
+            enabled: true,
+            base_url: "https://dav.example.com".to_string(),
+            ..crate::settings::WebDavSyncSettings::default()
+        });
 
         let check_idx = WebDavConfigItem::ALL
             .iter()
@@ -10566,14 +10571,154 @@ mod tests {
         app.config_webdav_idx = reset_idx;
         assert!(matches!(
             app.on_key(key(KeyCode::Enter), &data),
-            Action::ConfigWebDavReset
+            Action::None
+        ));
+        assert!(matches!(
+            app.overlay,
+            Overlay::Confirm(ConfirmOverlay {
+                action: ConfirmAction::CloudSyncReset {
+                    backend: CloudSyncBackend::WebDav
+                },
+                ..
+            })
         ));
 
         assert_eq!(
             WebDavConfigItem::ALL.len(),
-            6,
-            "WebDav submenu should include Jianguoyun quick setup"
+            7,
+            "WebDav submenu should include enable/disable and Jianguoyun quick setup"
         );
+    }
+
+    #[test]
+    fn config_s3_submenu_uses_preflight_and_enables_without_switching_backends() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::ConfigS3;
+        app.focus = Focus::Content;
+        let mut data = UiData::default();
+        data.config.s3_sync = Some(crate::settings::S3SyncSettings {
+            enabled: true,
+            region: "us-east-1".to_string(),
+            bucket: "sync-bucket".to_string(),
+            access_key_id: "AKID".to_string(),
+            secret_access_key: "SECRET".to_string(),
+            ..crate::settings::S3SyncSettings::default()
+        });
+
+        app.config_s3_idx = S3ConfigItem::ALL
+            .iter()
+            .position(|item| matches!(item, S3ConfigItem::Upload))
+            .expect("S3 upload action");
+        assert!(matches!(
+            app.on_key(key(KeyCode::Enter), &data),
+            Action::ConfigS3FetchRemoteInfo {
+                intent: CloudSyncTransferIntent::Upload
+            }
+        ));
+
+        data.config.s3_sync.as_mut().expect("S3 config").enabled = false;
+        data.config.webdav_sync = Some(crate::settings::WebDavSyncSettings {
+            enabled: true,
+            base_url: "https://dav.example.com".to_string(),
+            ..crate::settings::WebDavSyncSettings::default()
+        });
+        app.config_s3_idx = S3ConfigItem::ALL
+            .iter()
+            .position(|item| matches!(item, S3ConfigItem::EnableDisable))
+            .expect("S3 enable action");
+        assert!(matches!(
+            app.on_key(key(KeyCode::Enter), &data),
+            Action::ConfigS3SetEnabled { enabled: true }
+        ));
+    }
+
+    #[test]
+    fn disabled_webdav_allows_connection_check_but_not_transfer_selection() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::ConfigWebDav;
+        app.focus = Focus::Content;
+        let mut data = UiData::default();
+        data.config.webdav_sync = Some(crate::settings::WebDavSyncSettings {
+            enabled: false,
+            base_url: "https://dav.example.com".to_string(),
+            ..crate::settings::WebDavSyncSettings::default()
+        });
+
+        app.config_webdav_idx = WebDavConfigItem::ALL
+            .iter()
+            .position(|item| matches!(item, WebDavConfigItem::CheckConnection))
+            .expect("WebDAV connection action");
+        assert!(matches!(
+            app.on_key(key(KeyCode::Enter), &data),
+            Action::ConfigWebDavCheckConnection
+        ));
+
+        app.config_webdav_idx = WebDavConfigItem::ALL
+            .iter()
+            .position(|item| matches!(item, WebDavConfigItem::Upload))
+            .expect("WebDAV upload action");
+        assert!(matches!(
+            app.on_key(key(KeyCode::Enter), &data),
+            Action::None
+        ));
+        assert_eq!(
+            app.config_webdav_idx,
+            WebDavConfigItem::ALL
+                .iter()
+                .position(|item| matches!(item, WebDavConfigItem::Settings))
+                .expect("WebDAV settings action")
+        );
+    }
+
+    #[test]
+    fn webdav_submenu_clamps_a_stale_selection_even_when_filter_is_empty() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::ConfigWebDav;
+        app.focus = Focus::Content;
+        app.filter.input.set("no-such-webdav-action");
+        app.config_webdav_idx = usize::MAX;
+
+        assert!(matches!(
+            app.on_config_webdav_key(key(KeyCode::Up), &UiData::default()),
+            Action::None
+        ));
+        assert_eq!(app.config_webdav_idx, 0);
+    }
+
+    #[test]
+    fn s3_form_save_reports_required_fields_then_emits_plaintext_settings() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::ConfigS3;
+        app.focus = Focus::Content;
+        app.form = Some(FormState::S3Sync(
+            crate::cli::tui::form::S3SyncFormState::from_settings(None),
+        ));
+        let data = UiData::default();
+
+        assert!(matches!(
+            app.on_key(ctrl(KeyCode::Char('s')), &data),
+            Action::None
+        ));
+        let Some(FormState::S3Sync(form)) = app.form.as_mut() else {
+            panic!("S3 form should remain open after validation failure");
+        };
+        assert_eq!(
+            form.selected_field(),
+            crate::cli::tui::form::S3SyncField::Bucket
+        );
+        assert!(form
+            .field_error(crate::cli::tui::form::S3SyncField::Bucket)
+            .is_some());
+        form.region.set("us-east-1");
+        form.bucket.set("sync-bucket");
+        form.access_key_id.set("AKID");
+        form.secret_access_key.set("plain-secret");
+
+        assert!(matches!(
+            app.on_key(ctrl(KeyCode::Char('s')), &data),
+            Action::ConfigS3Save { settings }
+                if settings.secret_access_key == "plain-secret" && !settings.auto_sync
+        ));
     }
 
     #[test]

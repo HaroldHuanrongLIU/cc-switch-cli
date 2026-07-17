@@ -5779,6 +5779,68 @@ fn webdav_sync_time_formats_to_minute() {
 }
 
 #[test]
+fn cloud_sync_backend_page_shows_plain_disabled_status_without_suffix() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::ConfigCloudSync;
+    app.focus = Focus::Content;
+    let mut data = minimal_data(&app.app_type);
+    data.config.webdav_sync = Some(crate::settings::WebDavSyncSettings {
+        enabled: false,
+        base_url: "https://dav.example.com".to_string(),
+        ..crate::settings::WebDavSyncSettings::default()
+    });
+    data.config.s3_sync = Some(crate::settings::S3SyncSettings {
+        enabled: true,
+        region: "us-east-1".to_string(),
+        bucket: "sync-bucket".to_string(),
+        access_key_id: "AKID".to_string(),
+        secret_access_key: "SECRET".to_string(),
+        ..crate::settings::S3SyncSettings::default()
+    });
+
+    let content = content_text(&app, &render_with_size(&app, &data, 72, 16));
+    let webdav = line_with(&content, "WebDAV");
+    let s3 = line_with(&content, "S3 Compatible");
+    assert!(webdav.contains("Disabled"), "{content}");
+    assert!(!webdav.contains('·'), "{content}");
+    assert!(s3.contains("Enabled"), "{content}");
+}
+
+#[test]
+fn s3_form_ellipsizes_long_plaintext_and_survives_tiny_terminals() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::ConfigS3;
+    app.focus = Focus::Content;
+    let secret = format!("plain-secret-{}-tail", "x".repeat(160));
+    let settings = crate::settings::S3SyncSettings {
+        region: "us-east-1".to_string(),
+        bucket: "sync-bucket".to_string(),
+        access_key_id: "AKID".to_string(),
+        secret_access_key: secret.clone(),
+        ..crate::settings::S3SyncSettings::default()
+    };
+    app.form = Some(FormState::S3Sync(
+        crate::cli::tui::form::S3SyncFormState::from_settings(Some(&settings)),
+    ));
+    let data = minimal_data(&app.app_type);
+
+    let _ = render_with_size(&app, &data, 20, 8);
+    let content = content_text(&app, &render_with_size(&app, &data, 78, 18));
+    assert!(content.contains("plain-secret-"), "{content}");
+    assert!(content.contains('…'), "{content}");
+    assert!(!content.contains(&secret), "{content}");
+    assert!(!content.contains("[redacted]"), "{content}");
+}
+
+#[test]
 fn nav_does_not_show_manage_prefix_or_view_config() {
     let _lock = lock_env();
     let _no_color = EnvGuard::remove("NO_COLOR");

@@ -14,6 +14,8 @@ mod provider_request_overrides;
 mod provider_state;
 mod provider_state_loading;
 mod provider_templates;
+mod s3;
+mod webdav;
 
 pub(crate) const PROMPT_FORM_SPLIT_MIN_BODY_WIDTH: u16 = 84;
 
@@ -42,6 +44,8 @@ pub(crate) use provider_state::resolve_provider_id_for_submit;
 pub(crate) use provider_state::{
     detect_balance_provider_for_usage_query, detect_coding_plan_provider_for_usage_query,
 };
+pub(crate) use s3::{S3Preset, S3SyncField, S3SyncFormState};
+pub(crate) use webdav::{WebDavSyncField, WebDavSyncFormState};
 
 pub(crate) use crate::hermes_config::{HERMES_API_MODES, HERMES_DEFAULT_API_MODE};
 pub(crate) use crate::openclaw_config::{
@@ -656,6 +660,8 @@ pub enum FormState {
     ProviderAdd(ProviderAddFormState),
     McpAdd(McpAddFormState),
     PromptMeta(PromptMetaFormState),
+    S3Sync(S3SyncFormState),
+    WebDavSync(WebDavSyncFormState),
 }
 
 impl FormState {
@@ -664,6 +670,8 @@ impl FormState {
             FormState::ProviderAdd(form) => form.has_unsaved_changes(),
             FormState::McpAdd(form) => form.has_unsaved_changes(),
             FormState::PromptMeta(form) => form.has_unsaved_changes(),
+            FormState::S3Sync(form) => form.has_unsaved_changes(),
+            FormState::WebDavSync(form) => form.has_unsaved_changes(),
         }
     }
 
@@ -672,6 +680,8 @@ impl FormState {
             FormState::ProviderAdd(form) => form.is_editing(),
             FormState::McpAdd(form) => form.is_editing(),
             FormState::PromptMeta(form) => form.is_editing(),
+            FormState::S3Sync(form) => form.is_editing(),
+            FormState::WebDavSync(form) => form.is_editing(),
         }
     }
 }
